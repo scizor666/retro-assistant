@@ -30,9 +30,8 @@
                     android:layout_gravity="center_vertical|start"
                     android:layout_marginStart="8dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
-                    android:src="@drawable/outline_refresh_24"
+                    android:src="@drawable/ic_menu_24"
                     android:padding="12dp"
-                    android:rotation="90"
                     android:contentDescription="History" />
 
                 <LinearLayout
@@ -63,7 +62,7 @@
                     android:layout_gravity="center_vertical|end"
                     android:layout_marginEnd="8dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
-                    android:src="@drawable/outline_folder_open_24"
+                    android:src="@drawable/ic_settings_24"
                     android:padding="12dp"
                     android:contentDescription="Settings" />
             </FrameLayout>

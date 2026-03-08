@@ -196,6 +196,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun startNewChat() {
         currentConversationId = null
+        generationJob?.cancel()
         messageCollectionJob?.cancel()
         messages.clear()
         messageAdapter.notifyDataSetChanged()
@@ -207,6 +208,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun switchConversation(conversation: ConversationEntity) {
         currentConversationId = conversation.id
+        generationJob?.cancel()
         messageCollectionJob?.cancel()
         
         messageCollectionJob = lifecycleScope.launch {
@@ -346,9 +348,13 @@ class MainActivity : AppCompatActivity() {
                 userActionFab.isEnabled = false
 
                 // Update message states
+                val insertPos = messages.size
                 messages.add(Message(UUID.randomUUID().toString(), userMsg, true))
                 lastAssistantMsg.clear()
                 messages.add(Message(UUID.randomUUID().toString(), lastAssistantMsg.toString(), false))
+                
+                messageAdapter.notifyItemRangeInserted(insertPos, 2)
+                messagesRv.scrollToPosition(messages.size - 1)
 
                 // Show clear button when first message is added
                 clearChatBtn.visibility = android.view.View.VISIBLE
@@ -367,20 +373,30 @@ class MainActivity : AppCompatActivity() {
                     engine.sendUserPrompt(userMsg)
                         .onCompletion {
                             withContext(Dispatchers.Main) {
+                                if (lastAssistantMsg.isEmpty()) {
+                                    val messageCount = messages.size
+                                    if (messageCount > 0 && !messages[messageCount - 1].isUser) {
+                                        messages.removeAt(messageCount - 1).copy(
+                                            content = "(No response from model)"
+                                        ).let { messages.add(it) }
+                                        messageAdapter.notifyItemChanged(messages.size - 1)
+                                    }
+                                }
                                 userInputEt.isEnabled = true
                                 userActionFab.isEnabled = true
                             }
                         }.collect { token ->
+                            Log.d(TAG, "Token received: '$token'")
                             withContext(Dispatchers.Main) {
                                 val messageCount = messages.size
-                                check(messageCount > 0 && !messages[messageCount - 1].isUser)
+                                if (messageCount > 0 && !messages[messageCount - 1].isUser) {
+                                    messages.removeAt(messageCount - 1).copy(
+                                        content = lastAssistantMsg.append(token).toString()
+                                    ).let { messages.add(it) }
 
-                                messages.removeAt(messageCount - 1).copy(
-                                    content = lastAssistantMsg.append(token).toString()
-                                ).let { messages.add(it) }
-
-                                messageAdapter.notifyItemChanged(messages.size - 1)
-                                messagesRv.scrollToPosition(messages.size - 1)
+                                    messageAdapter.notifyItemChanged(messages.size - 1)
+                                    messagesRv.scrollToPosition(messages.size - 1)
+                                }
                             }
                         }
                     
