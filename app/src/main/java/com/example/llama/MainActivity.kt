@@ -41,11 +41,12 @@ import android.widget.Button
 class MainActivity : AppCompatActivity() {
 
     // Android views
-    private lateinit var ggufTv: TextView
     private lateinit var messagesRv: RecyclerView
     private lateinit var userInputEt: EditText
     private lateinit var userActionFab: FloatingActionButton
     private lateinit var clearChatBtn: ImageButton
+    private lateinit var openSettingsBtn: ImageButton
+    private lateinit var loadingPb: android.widget.ProgressBar
 
     // Arm AI Chat inference engine
     private lateinit var engine: InferenceEngine
@@ -66,6 +67,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var newChatBtn: Button
     private lateinit var openHistoryBtn: ImageButton
     private var messageCollectionJob: Job? = null
+    private var isRefreshingModel = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,7 +77,6 @@ class MainActivity : AppCompatActivity() {
         onBackPressedDispatcher.addCallback { Log.w(TAG, "Ignore back press for simplicity") }
 
         // Find views
-        ggufTv = findViewById(R.id.gguf)
         messagesRv = findViewById(R.id.messages)
         messagesRv.layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
         messagesRv.adapter = messageAdapter
@@ -86,6 +87,8 @@ class MainActivity : AppCompatActivity() {
         historyRv = findViewById(R.id.history_rv)
         newChatBtn = findViewById(R.id.new_chat_btn)
         openHistoryBtn = findViewById(R.id.open_history)
+        openSettingsBtn = findViewById(R.id.open_settings)
+        loadingPb = findViewById(R.id.loading_pb)
 
         // Arm AI Chat initialization
         lifecycleScope.launch(Dispatchers.Default) {
@@ -100,30 +103,21 @@ class MainActivity : AppCompatActivity() {
             }
             
             // Check for last selected model
-            val prefs = getPreferences(Context.MODE_PRIVATE)
+            val prefs = getSharedPreferences(SettingsActivity.PREFS_NAME, Context.MODE_PRIVATE)
             val lastPath = prefs.getString(PREF_LAST_MODEL_PATH, null)
-            val lastMetadata = prefs.getString(PREF_LAST_MODEL_METADATA, null)
             
             if (lastPath != null && File(lastPath).exists()) {
-                withContext(Dispatchers.Main) {
-                    ggufTv.text = "Restoring previous model..."
-                }
                 try {
+                    withContext(Dispatchers.Main) {
+                        loadingPb.visibility = android.view.View.VISIBLE
+                    }
                     loadModel("Last Model", File(lastPath))
                     withContext(Dispatchers.Main) {
-                        ggufTv.text = lastMetadata ?: "Model loaded."
                         onModelReady()
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to restore last model", e)
                 }
-            }
-        }
-
-        // Allow clicking the metadata area to pick another model
-        ggufTv.setOnClickListener {
-            if (!isUninterruptible()) {
-                getContent.launch(arrayOf("*/*"))
             }
         }
 
@@ -133,9 +127,14 @@ class MainActivity : AppCompatActivity() {
                 // If model is ready, validate input and send to engine
                 handleUserInput()
             } else {
-                // Otherwise, prompt user to select a GGUF metadata on the device
-                getContent.launch(arrayOf("*/*"))
+                // Otherwise, prompt user to go to settings
+                Toast.makeText(this, "Please select a model in Settings first", Toast.LENGTH_SHORT).show()
+                startActivity(Intent(this, SettingsActivity::class.java))
             }
+        }
+
+        openSettingsBtn.setOnClickListener {
+            startActivity(Intent(this, SettingsActivity::class.java))
         }
 
         clearChatBtn.setOnClickListener {
@@ -149,6 +148,34 @@ class MainActivity : AppCompatActivity() {
         newChatBtn.setOnClickListener {
             startNewChat()
             drawerLayout.closeDrawers()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val prefs = getSharedPreferences(SettingsActivity.PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(PREF_MODEL_CHANGED, false) && !isRefreshingModel) {
+            isRefreshingModel = true
+            prefs.edit().putBoolean(PREF_MODEL_CHANGED, false).apply()
+            
+            val lastPath = prefs.getString(PREF_LAST_MODEL_PATH, null)
+            if (lastPath != null && File(lastPath).exists()) {
+                loadingPb.visibility = android.view.View.VISIBLE
+                lifecycleScope.launch {
+                    try {
+                        loadModel("New Model", File(lastPath))
+                        onModelReady()
+                        startNewChat()
+                        Toast.makeText(this@MainActivity, "Model reloaded", Toast.LENGTH_SHORT).show()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to refresh model", e)
+                    } finally {
+                        isRefreshingModel = false
+                    }
+                }
+            } else {
+                isRefreshingModel = false
+            }
         }
     }
 
@@ -231,47 +258,24 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         Log.i(TAG, "Selected file uri:\n $uri")
-        uri?.let { handleSelectedModel(it) }
+        uri?.let { handleSelectedModel(uri) }
     }
 
-    /**
-     * Handles the file Uri from [getContent] result
-     */
     private fun handleSelectedModel(uri: Uri) {
-        // Update UI states
-        userActionFab.isEnabled = false
-        userInputEt.hint = "Parsing GGUF..."
-        ggufTv.text = "Parsing metadata from selected file \n$uri"
-
         lifecycleScope.launch(Dispatchers.IO) {
-            // Parse GGUF metadata
-            Log.i(TAG, "Parsing GGUF metadata...")
             contentResolver.openInputStream(uri)?.use {
                 GgufMetadataReader.create().readStructuredMetadata(it)
             }?.let { metadata ->
-                // Update UI to show GGUF metadata to user
-                Log.i(TAG, "GGUF parsed: \n$metadata")
-                withContext(Dispatchers.Main) {
-                    ggufTv.text = metadata.toString()
-                }
-
-                // Ensure the model file is available
                 val modelName = metadata.filename() + FILE_EXTENSION_GGUF
                 contentResolver.openInputStream(uri)?.use { input ->
                     ensureModelFile(modelName, input)
                 }?.let { modelFile ->
                     loadModel(modelName, modelFile)
-
                     withContext(Dispatchers.Main) {
-                        val metadataStr = metadata.toString()
-                        ggufTv.text = metadataStr
-                        
-                        // Save for persistence
-                        getPreferences(Context.MODE_PRIVATE).edit()
+                        getSharedPreferences(SettingsActivity.PREFS_NAME, Context.MODE_PRIVATE).edit()
                             .putString(PREF_LAST_MODEL_PATH, modelFile.absolutePath)
-                            .putString(PREF_LAST_MODEL_METADATA, metadataStr)
+                            .putString(PREF_LAST_MODEL_METADATA, metadata.toString())
                             .apply()
-                            
                         onModelReady()
                     }
                 }
@@ -281,6 +285,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun onModelReady() {
         isModelReady = true
+        loadingPb.visibility = android.view.View.GONE
         userInputEt.hint = "Type and send a message!"
         userInputEt.isEnabled = true
         userActionFab.setImageResource(R.drawable.outline_send_24)
@@ -349,7 +354,7 @@ class MainActivity : AppCompatActivity() {
                 clearChatBtn.visibility = android.view.View.VISIBLE
 
                 lifecycleScope.launch {
-                    val prefs = getPreferences(Context.MODE_PRIVATE)
+                    val prefs = getSharedPreferences(SettingsActivity.PREFS_NAME, Context.MODE_PRIVATE)
                     val modelPath = prefs.getString(PREF_LAST_MODEL_PATH, "") ?: ""
                     
                     if (currentConversationId == null) {
@@ -442,8 +447,9 @@ class MainActivity : AppCompatActivity() {
         private const val BENCH_SEQUENCE = 1
         private const val BENCH_REPETITION = 3
 
-        private const val PREF_LAST_MODEL_PATH = "last_model_path"
-        private const val PREF_LAST_MODEL_METADATA = "last_model_metadata"
+        const val PREF_LAST_MODEL_PATH = "last_model_path"
+        const val PREF_LAST_MODEL_METADATA = "last_model_metadata"
+        const val PREF_MODEL_CHANGED = "model_changed_flag"
     }
 }
 

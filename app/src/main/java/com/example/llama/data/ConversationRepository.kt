@@ -29,9 +29,8 @@ class ConversationRepository(private val db: AppDatabase) {
         }
     }
 
-    suspend fun deleteConversation(id: Long) {
-        conversationDao.getConversationById(id)?.let {
-            conversationDao.deleteConversation(it)
-        }
+    suspend fun clearAllHistory() {
+        conversationDao.deleteAllConversations()
+        messageDao.deleteAllMessages()
     }
 }

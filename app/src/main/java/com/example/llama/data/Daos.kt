@@ -22,6 +22,9 @@ interface ConversationDao {
 
     @Query("DELETE FROM conversations WHERE id NOT IN (SELECT id FROM conversations ORDER BY lastUpdatedAt DESC LIMIT 1000)")
     suspend fun deleteOldConversations()
+
+    @Query("DELETE FROM conversations")
+    suspend fun deleteAllConversations()
 }
 
 @Dao
@@ -34,4 +37,7 @@ interface MessageDao {
 
     @Query("DELETE FROM messages WHERE conversationId = :conversationId")
     suspend fun deleteMessagesForConversation(conversationId: Long)
+
+    @Query("DELETE FROM messages")
+    suspend fun deleteAllMessages()
 }
