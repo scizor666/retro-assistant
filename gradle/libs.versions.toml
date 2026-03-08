@@ -2,7 +2,8 @@
 
 # Plugins
 agp = "8.13.2"
-kotlin = "2.3.0"
+kotlin = "2.1.10"
+ksp = "2.1.10-1.0.29"
 
 # AndroidX
 activity = "1.12.2"
@@ -10,6 +11,7 @@ appcompat = "1.7.1"
 core-ktx = "1.17.0"
 constraint-layout = "2.2.1"
 datastore-preferences = "1.2.0"
+room = "2.7.0-alpha13"
 
 # Material
 material = "1.13.0"
@@ -24,6 +26,7 @@ junit = "4.13.2"
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
 jetbrains-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 
 
 [libraries]
@@ -34,6 +37,9 @@ androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version
 androidx-constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraint-layout" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx" }
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore-preferences" }
+androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
+androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 
 #Material
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }

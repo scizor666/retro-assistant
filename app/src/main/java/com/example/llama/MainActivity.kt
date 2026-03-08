@@ -30,6 +30,13 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.util.UUID
+import com.example.llama.data.AppDatabase
+import com.example.llama.data.ConversationRepository
+import com.example.llama.data.ConversationEntity
+import com.example.llama.data.MessageEntity
+import androidx.drawerlayout.widget.DrawerLayout
+import com.google.android.material.navigation.NavigationView
+import android.widget.Button
 
 class MainActivity : AppCompatActivity() {
 
@@ -50,6 +57,16 @@ class MainActivity : AppCompatActivity() {
     private val lastAssistantMsg = StringBuilder()
     private val messageAdapter = MessageAdapter(messages)
 
+    // History states
+    private lateinit var repository: ConversationRepository
+    private var currentConversationId: Long? = null
+    private lateinit var drawerLayout: DrawerLayout
+    private lateinit var historyRv: RecyclerView
+    private lateinit var historyAdapter: HistoryAdapter
+    private lateinit var newChatBtn: Button
+    private lateinit var openHistoryBtn: ImageButton
+    private var messageCollectionJob: Job? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -65,10 +82,22 @@ class MainActivity : AppCompatActivity() {
         userInputEt = findViewById(R.id.user_input)
         userActionFab = findViewById(R.id.fab)
         clearChatBtn = findViewById(R.id.clear_chat)
+        drawerLayout = findViewById(R.id.drawer_layout)
+        historyRv = findViewById(R.id.history_rv)
+        newChatBtn = findViewById(R.id.new_chat_btn)
+        openHistoryBtn = findViewById(R.id.open_history)
 
         // Arm AI Chat initialization
         lifecycleScope.launch(Dispatchers.Default) {
+            val database = AppDatabase.getDatabase(applicationContext)
+            repository = ConversationRepository(database)
+            
             engine = AiChat.getInferenceEngine(applicationContext)
+            
+            // Observe conversation history
+            launch(Dispatchers.Main) {
+                setupHistoryUI()
+            }
             
             // Check for last selected model
             val prefs = getPreferences(Context.MODE_PRIVATE)
@@ -112,19 +141,89 @@ class MainActivity : AppCompatActivity() {
         clearChatBtn.setOnClickListener {
             handleClearChat()
         }
+
+        openHistoryBtn.setOnClickListener {
+            drawerLayout.openDrawer(android.view.Gravity.START)
+        }
+
+        newChatBtn.setOnClickListener {
+            startNewChat()
+            drawerLayout.closeDrawers()
+        }
+    }
+
+    private fun setupHistoryUI() {
+        historyAdapter = HistoryAdapter(emptyList()) { conversation ->
+            switchConversation(conversation)
+            drawerLayout.closeDrawers()
+        }
+        historyRv.layoutManager = LinearLayoutManager(this)
+        historyRv.adapter = historyAdapter
+
+        lifecycleScope.launch {
+            repository.getAllConversations().collect { conversations ->
+                historyAdapter.updateData(conversations)
+            }
+        }
+    }
+
+    private fun startNewChat() {
+        currentConversationId = null
+        messageCollectionJob?.cancel()
+        messages.clear()
+        messageAdapter.notifyDataSetChanged()
+        engine.resetChat()
+        clearChatBtn.visibility = android.view.View.GONE
+        userInputEt.text = null
+        Toast.makeText(this, "Started new chat", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun switchConversation(conversation: ConversationEntity) {
+        currentConversationId = conversation.id
+        messageCollectionJob?.cancel()
+        
+        messageCollectionJob = lifecycleScope.launch {
+            // Restore model if needed (simplified: just log it for now as loading models is expensive)
+            // Ideally we'd compare modelPath with current loaded model
+            
+            repository.getMessagesForConversation(conversation.id).collect { dbMessages ->
+                withContext(Dispatchers.Main) {
+                    messages.clear()
+                    dbMessages.forEach {
+                        messages.add(Message(it.id.toString(), it.content, it.isUser))
+                    }
+                    messageAdapter.notifyDataSetChanged()
+                    messagesRv.scrollToPosition(messages.size - 1)
+                    
+                    if (messages.isNotEmpty()) {
+                        clearChatBtn.visibility = android.view.View.VISIBLE
+                    }
+                }
+            }
+        }
     }
 
     private fun handleClearChat() {
         if (!isModelReady) return
-        
+
         // Reset engine context
         engine.resetChat()
-        
-        // Clear UI messages
-        val count = messages.size
-        messages.clear()
-        messageAdapter.notifyItemRangeRemoved(0, count)
-        
+
+        // Hide clear button
+        clearChatBtn.visibility = android.view.View.GONE
+
+        // If we have a conversation, we should probably delete its messages in DB too
+        // or just start a new session. For now, let's just clear the current UI session.
+        currentConversationId?.let { id ->
+            lifecycleScope.launch {
+                // repository.deleteMessagesForConversation(id) // Optional: keep history but clear content?
+                // Let's just start a new chat for simplicity
+                startNewChat()
+            }
+        } ?: run {
+            startNewChat()
+        }
+
         Toast.makeText(this, "Chat session reset", Toast.LENGTH_SHORT).show()
     }
 
@@ -246,6 +345,19 @@ class MainActivity : AppCompatActivity() {
                 lastAssistantMsg.clear()
                 messages.add(Message(UUID.randomUUID().toString(), lastAssistantMsg.toString(), false))
 
+                // Show clear button when first message is added
+                clearChatBtn.visibility = android.view.View.VISIBLE
+
+                lifecycleScope.launch {
+                    val prefs = getPreferences(Context.MODE_PRIVATE)
+                    val modelPath = prefs.getString(PREF_LAST_MODEL_PATH, "") ?: ""
+                    
+                    if (currentConversationId == null) {
+                        currentConversationId = repository.createNewConversation(modelPath, userMsg.take(20))
+                    }
+                    repository.addMessage(currentConversationId!!, userMsg, true)
+                }
+
                 generationJob = lifecycleScope.launch(Dispatchers.Default) {
                     engine.sendUserPrompt(userMsg)
                         .onCompletion {
@@ -263,8 +375,14 @@ class MainActivity : AppCompatActivity() {
                                 ).let { messages.add(it) }
 
                                 messageAdapter.notifyItemChanged(messages.size - 1)
+                                messagesRv.scrollToPosition(messages.size - 1)
                             }
                         }
+                    
+                    // Persist assistant message once finished
+                    currentConversationId?.let { id ->
+                        repository.addMessage(id, lastAssistantMsg.toString(), false)
+                    }
                 }
             }
         }
@@ -304,6 +422,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         generationJob?.cancel()
+        messageCollectionJob?.cancel()
         super.onStop()
     }
 
@@ -344,6 +463,6 @@ fun GgufMetadata.filename() = when {
         }
     }
     else -> {
-        "model-${System.currentTimeMillis().toHexString()}"
+        "model-${java.lang.Long.toHexString(System.currentTimeMillis())}"
     }
 }
