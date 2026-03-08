@@ -1,0 +1,25 @@
+# Gradle
+.gradle/
+build/
+*/build/
+
+# NDK
+.cxx/
+
+# Android
+local.properties
+*.apk
+*.aar
+*.jks
+
+# Models
+models/
+*.gguf
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Logs
+*.log
