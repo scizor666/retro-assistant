@@ -12,6 +12,8 @@ class ConversationRepository(private val db: AppDatabase) {
 
     fun getAllConversations(): Flow<List<ConversationEntity>> = conversationDao.getAllConversations()
 
+    fun searchConversations(query: String): Flow<List<ConversationEntity>> = conversationDao.searchConversations(query)
+
     fun getMessagesForConversation(conversationId: Long): Flow<List<MessageEntity>> =
         messageDao.getMessagesForConversation(conversationId)
 
