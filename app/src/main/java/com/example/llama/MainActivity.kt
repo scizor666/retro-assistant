@@ -23,7 +23,11 @@ import com.arm.aichat.gguf.GgufMetadataReader
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onCompletion
+
+import kotlinx.coroutines.flow.onStart
+
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -207,28 +211,36 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun switchConversation(conversation: ConversationEntity) {
+        Log.i(TAG, "Switching to conversation ID: ${conversation.id}, Title: ${conversation.title}")
         currentConversationId = conversation.id
         generationJob?.cancel()
         messageCollectionJob?.cancel()
         
+        // Reset engine context before switching
+        Log.d(TAG, "Calling engine.resetChat()")
+        engine.resetChat()
+        
         messageCollectionJob = lifecycleScope.launch {
-            // Restore model if needed (simplified: just log it for now as loading models is expensive)
-            // Ideally we'd compare modelPath with current loaded model
-            
-            repository.getMessagesForConversation(conversation.id).collect { dbMessages ->
-                withContext(Dispatchers.Main) {
-                    messages.clear()
-                    dbMessages.forEach {
-                        messages.add(Message(it.id.toString(), it.content, it.isUser))
-                    }
-                    messageAdapter.notifyDataSetChanged()
-                    messagesRv.scrollToPosition(messages.size - 1)
-                    
-                    if (messages.isNotEmpty()) {
-                        clearChatBtn.visibility = android.view.View.VISIBLE
-                    }
+            Log.d(TAG, "Starting message collection for ${conversation.id}")
+            val dbMessages = repository.getMessagesForConversation(conversation.id).first()
+            Log.d(TAG, "Received ${dbMessages.size} messages from DB for ${conversation.id}")
+            withContext(Dispatchers.Main) {
+                messages.clear()
+                dbMessages.forEach {
+                    messages.add(Message(it.id.toString(), it.content, it.isUser))
+                }
+                messageAdapter.notifyDataSetChanged()
+                messagesRv.scrollToPosition(messages.size - 1)
+                
+                if (messages.isNotEmpty()) {
+                    clearChatBtn.visibility = android.view.View.VISIBLE
                 }
             }
+            
+            // The engine context is reset via engine.resetChat() earlier.
+            // Rebuilding full context by re-generating every message is too expensive.
+            // Ideally the SDK has a method to inject history without generating.
+            // For now, it will just act as a renewed session.
         }
     }
 
@@ -364,14 +376,20 @@ class MainActivity : AppCompatActivity() {
                     val modelPath = prefs.getString(PREF_LAST_MODEL_PATH, "") ?: ""
                     
                     if (currentConversationId == null) {
+                        Log.i(TAG, "Starting NEW conversation")
                         currentConversationId = repository.createNewConversation(modelPath, userMsg.take(20))
+                    } else {
+                        Log.i(TAG, "Continuing conversation ID: $currentConversationId")
                     }
                     repository.addMessage(currentConversationId!!, userMsg, true)
                 }
 
+                Log.d(TAG, "Launching generation job for prompt: '${userMsg.take(50)}...'")
                 generationJob = lifecycleScope.launch(Dispatchers.Default) {
                     engine.sendUserPrompt(userMsg)
-                        .onCompletion {
+                        .onStart { Log.d(TAG, "Generation started") }
+                        .onCompletion { error: Throwable? ->
+                            Log.d(TAG, "Generation completed. Total assistant tokens: ${lastAssistantMsg.length}, Error: $error")
                             withContext(Dispatchers.Main) {
                                 if (lastAssistantMsg.isEmpty()) {
                                     val messageCount = messages.size
@@ -384,8 +402,18 @@ class MainActivity : AppCompatActivity() {
                                 }
                                 userInputEt.isEnabled = true
                                 userActionFab.isEnabled = true
+                                
+                                // Persist assistant message once finished
+                                currentConversationId?.let { id ->
+                                    val finalMsg = if (lastAssistantMsg.isEmpty()) "(No response from model)" else lastAssistantMsg.toString()
+                                    // Use a separate coroutine or scope if needed, but we are inside launch(Dispatchers.Default) usually, 
+                                    // however we are inside withContext(Dispatchers.Main) here.
+                                    lifecycleScope.launch {
+                                        repository.addMessage(id, finalMsg, false)
+                                    }
+                                }
                             }
-                        }.collect { token ->
+                        }.collect { token: String ->
                             Log.d(TAG, "Token received: '$token'")
                             withContext(Dispatchers.Main) {
                                 val messageCount = messages.size
@@ -399,11 +427,6 @@ class MainActivity : AppCompatActivity() {
                                 }
                             }
                         }
-                    
-                    // Persist assistant message once finished
-                    currentConversationId?.let { id ->
-                        repository.addMessage(id, lastAssistantMsg.toString(), false)
-                    }
                 }
             }
         }
