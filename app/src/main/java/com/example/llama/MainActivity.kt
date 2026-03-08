@@ -10,6 +10,8 @@ import android.widget.ImageButton
 import android.widget.TextView
 import android.text.Editable
 import android.text.TextWatcher
+import android.view.View
+import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 
 import androidx.activity.addCallback
@@ -28,6 +30,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 
 import kotlinx.coroutines.flow.onStart
 
@@ -76,6 +81,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var openHistoryBtn: ImageButton
     private var messageCollectionJob: Job? = null
     private var isRefreshingModel = false
+    private val searchQuery = MutableStateFlow("")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -158,6 +164,19 @@ class MainActivity : AppCompatActivity() {
             startNewChat()
             drawerLayout.closeDrawers()
         }
+
+        drawerLayout.addDrawerListener(object : androidx.drawerlayout.widget.DrawerLayout.SimpleDrawerListener() {
+            override fun onDrawerClosed(drawerView: View) {
+                super.onDrawerClosed(drawerView)
+                historySearchEt.clearFocus()
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                imm.hideSoftInputFromWindow(drawerView.windowToken, 0)
+                
+                if (userInputEt.isEnabled) {
+                    userInputEt.requestFocus()
+                }
+            }
+        })
     }
 
     override fun onResume() {
@@ -199,13 +218,20 @@ class MainActivity : AppCompatActivity() {
         historySearchEt.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                historyAdapter.filter(s?.toString() ?: "")
+                searchQuery.value = s?.toString() ?: ""
             }
             override fun afterTextChanged(s: Editable?) {}
         })
 
+        @OptIn(ExperimentalCoroutinesApi::class)
         lifecycleScope.launch {
-            repository.getAllConversations().collect { conversations ->
+            searchQuery.flatMapLatest { query ->
+                if (query.isEmpty()) {
+                    repository.getAllConversations()
+                } else {
+                    repository.searchConversations(query)
+                }
+            }.collect { conversations ->
                 historyAdapter.updateData(conversations)
             }
         }
