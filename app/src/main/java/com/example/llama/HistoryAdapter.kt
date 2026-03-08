@@ -10,11 +10,9 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 class HistoryAdapter(
-    private var allConversations: List<ConversationEntity>,
+    private var conversations: List<ConversationEntity>,
     private val onItemClick: (ConversationEntity) -> Unit
 ) : RecyclerView.Adapter<HistoryAdapter.ViewHolder>() {
-
-    private var displayConversations: List<ConversationEntity> = allConversations
 
     class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
         val titleTv: TextView = view.findViewById(R.id.conv_title)
@@ -28,29 +26,18 @@ class HistoryAdapter(
     }
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
-        val conv = displayConversations[position]
-        holder.titleTv.text = "\u2022 ${conv.title}"
+        val conv = conversations[position]
+        val titleText = conv.title.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() }
+        holder.titleTv.text = "\u2022 $titleText"
         val sdf = SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault())
         holder.dateTv.text = sdf.format(Date(conv.lastUpdatedAt))
         holder.itemView.setOnClickListener { onItemClick(conv) }
     }
 
-    override fun getItemCount(): Int = displayConversations.size
+    override fun getItemCount(): Int = conversations.size
 
     fun updateData(newConversations: List<ConversationEntity>) {
-        allConversations = newConversations
-        displayConversations = newConversations
-        notifyDataSetChanged()
-    }
-
-    fun filter(query: String) {
-        displayConversations = if (query.isEmpty()) {
-            allConversations
-        } else {
-            allConversations.filter {
-                it.title.contains(query, ignoreCase = true)
-            }
-        }
+        conversations = newConversations
         notifyDataSetChanged()
     }
 }
