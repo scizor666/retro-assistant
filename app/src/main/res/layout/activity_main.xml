@@ -156,6 +156,14 @@
                 style="@style/Widget.MaterialComponents.Button.OutlinedButton"
                 android:layout_marginBottom="16dp" />
 
+            <EditText
+                android:id="@+id/history_search"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Search history"
+                android:inputType="text"
+                android:layout_marginBottom="16dp" />
+
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/history_rv"
                 android:layout_width="match_parent"

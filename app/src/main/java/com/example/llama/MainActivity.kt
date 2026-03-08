@@ -8,7 +8,10 @@ import android.util.Log
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.TextView
+import android.text.Editable
+import android.text.TextWatcher
 import android.widget.Toast
+
 import androidx.activity.addCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -69,6 +72,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var historyRv: RecyclerView
     private lateinit var historyAdapter: HistoryAdapter
     private lateinit var newChatBtn: Button
+    private lateinit var historySearchEt: EditText
     private lateinit var openHistoryBtn: ImageButton
     private var messageCollectionJob: Job? = null
     private var isRefreshingModel = false
@@ -90,6 +94,7 @@ class MainActivity : AppCompatActivity() {
         drawerLayout = findViewById(R.id.drawer_layout)
         historyRv = findViewById(R.id.history_rv)
         newChatBtn = findViewById(R.id.new_chat_btn)
+        historySearchEt = findViewById(R.id.history_search)
         openHistoryBtn = findViewById(R.id.open_history)
         openSettingsBtn = findViewById(R.id.open_settings)
         loadingPb = findViewById(R.id.loading_pb)
@@ -190,6 +195,14 @@ class MainActivity : AppCompatActivity() {
         }
         historyRv.layoutManager = LinearLayoutManager(this)
         historyRv.adapter = historyAdapter
+
+        historySearchEt.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                historyAdapter.filter(s?.toString() ?: "")
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
 
         lifecycleScope.launch {
             repository.getAllConversations().collect { conversations ->

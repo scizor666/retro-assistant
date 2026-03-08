@@ -10,9 +10,11 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 class HistoryAdapter(
-    private var conversations: List<ConversationEntity>,
+    private var allConversations: List<ConversationEntity>,
     private val onItemClick: (ConversationEntity) -> Unit
 ) : RecyclerView.Adapter<HistoryAdapter.ViewHolder>() {
+
+    private var displayConversations: List<ConversationEntity> = allConversations
 
     class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
         val titleTv: TextView = view.findViewById(R.id.conv_title)
@@ -26,17 +28,29 @@ class HistoryAdapter(
     }
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
-        val conv = conversations[position]
-        holder.titleTv.text = conv.title
+        val conv = displayConversations[position]
+        holder.titleTv.text = "\u2022 ${conv.title}"
         val sdf = SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault())
         holder.dateTv.text = sdf.format(Date(conv.lastUpdatedAt))
         holder.itemView.setOnClickListener { onItemClick(conv) }
     }
 
-    override fun getItemCount(): Int = conversations.size
+    override fun getItemCount(): Int = displayConversations.size
 
     fun updateData(newConversations: List<ConversationEntity>) {
-        conversations = newConversations
+        allConversations = newConversations
+        displayConversations = newConversations
+        notifyDataSetChanged()
+    }
+
+    fun filter(query: String) {
+        displayConversations = if (query.isEmpty()) {
+            allConversations
+        } else {
+            allConversations.filter {
+                it.title.contains(query, ignoreCase = true)
+            }
+        }
         notifyDataSetChanged()
     }
 }
