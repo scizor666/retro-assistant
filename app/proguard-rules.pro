@@ -27,3 +27,8 @@
     public static int v(...);
     public static int d(...);
 }
+
+# MediaPipe & R8 ignore annotations
+-dontwarn javax.annotation.processing.**
+-dontwarn javax.lang.model.**
+-keep class com.google.mediapipe.tasks.** { *; }

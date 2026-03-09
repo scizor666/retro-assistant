@@ -13,6 +13,9 @@ constraint-layout = "2.2.1"
 datastore-preferences = "1.2.0"
 room = "2.7.0-alpha13"
 
+# MediaPipe
+mediapipe = "0.10.14"
+
 # Material
 material = "1.13.0"
 
@@ -43,6 +46,9 @@ androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = 
 
 #Material
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
+
+# MediaPipe
+mediapipe-tasks-text = { group = "com.google.mediapipe", name = "tasks-text", version.ref = "mediapipe" }
 
 # Testing
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso-core" }

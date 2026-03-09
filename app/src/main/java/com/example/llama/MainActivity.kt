@@ -49,6 +49,7 @@ import com.example.llama.data.MessageEntity
 import androidx.drawerlayout.widget.DrawerLayout
 import com.google.android.material.navigation.NavigationView
 import android.widget.Button
+import com.example.llama.rag.RagManager
 
 class MainActivity : AppCompatActivity() {
 
@@ -82,6 +83,9 @@ class MainActivity : AppCompatActivity() {
     private var messageCollectionJob: Job? = null
     private var isRefreshingModel = false
     private val searchQuery = MutableStateFlow("")
+
+    // RAG: lazily initialised so it doesn't block onCreate
+    private val ragManager by lazy { RagManager(applicationContext) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -423,9 +427,23 @@ class MainActivity : AppCompatActivity() {
                     repository.addMessage(currentConversationId!!, userMsg, true)
                 }
 
-                Log.d(TAG, "Launching generation job for prompt: '${userMsg.take(50)}...'")
+                Log.i(TAG, "Launching generation job for prompt: '${userMsg.take(50)}...'")
                 generationJob = lifecycleScope.launch(Dispatchers.Default) {
-                    engine.sendUserPrompt(userMsg)
+                    // RAG: retrieve context on IO, prepend to prompt if found.
+                    // UI always shows userMsg; only the engine receives the augmented prompt.
+                    Log.i(TAG, "RAG: Requesting context for user input...")
+                    val ragContext = ragManager.getContext(userMsg)
+                    if (ragContext != null) {
+                        Log.i(TAG, "RAG: SUCCESS. Injected context of length ${ragContext.length}")
+                    } else {
+                        Log.i(TAG, "RAG: SKIPPED. No relevant context found.")
+                    }
+                    val promptToSend = if (ragContext != null) {
+                        "Context:\n$ragContext\n\nQuestion:\n$userMsg"
+                    } else {
+                        userMsg
+                    }
+                    engine.sendUserPrompt(promptToSend)
                         .onStart { Log.d(TAG, "Generation started") }
                         .onCompletion { error: Throwable? ->
                             Log.d(TAG, "Generation completed. Total assistant tokens: ${lastAssistantMsg.length}, Error: $error")
@@ -453,7 +471,7 @@ class MainActivity : AppCompatActivity() {
                                 }
                             }
                         }.collect { token: String ->
-                            Log.d(TAG, "Token received: '$token'")
+                            Log.i(TAG, "Token received: '$token'")
                             withContext(Dispatchers.Main) {
                                 val messageCount = messages.size
                                 if (messageCount > 0 && !messages[messageCount - 1].isUser) {

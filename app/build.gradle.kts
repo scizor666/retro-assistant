@@ -25,8 +25,8 @@ android {
 
     buildTypes {
         debug {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android.txt"),
                 "proguard-rules.pro"
@@ -56,6 +56,7 @@ dependencies {
     ksp(libs.androidx.room.compiler)
 
     implementation(project(":lib"))
+    implementation(libs.mediapipe.tasks.text)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
