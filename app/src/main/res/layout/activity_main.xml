@@ -112,6 +112,17 @@
                     style="@style/TextAppearance.MaterialComponents.Body2"
                     android:hint="Please first pick a GGUF model file to import." />
 
+                <ImageButton
+                    android:id="@+id/pick_image_btn"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:padding="12dp"
+                    android:scaleType="fitCenter"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:src="@drawable/ic_photo_library"
+                    android:visibility="visible"
+                    android:contentDescription="Pick Image" />
+
                 <com.google.android.material.floatingactionbutton.FloatingActionButton
                     android:id="@+id/fab"
                     android:enabled="true"

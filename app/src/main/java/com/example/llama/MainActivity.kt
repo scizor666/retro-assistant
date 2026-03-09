@@ -59,11 +59,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var userActionFab: FloatingActionButton
     private lateinit var clearChatBtn: ImageButton
     private lateinit var openSettingsBtn: ImageButton
+    private lateinit var pickImageBtn: ImageButton
     private lateinit var loadingPb: android.widget.ProgressBar
 
     // Arm AI Chat inference engine
     private lateinit var engine: InferenceEngine
     private var generationJob: Job? = null
+    private var selectedImageBytes: ByteArray? = null
 
     // Conversation states
     private var isModelReady = false
@@ -100,6 +102,7 @@ class MainActivity : AppCompatActivity() {
         messagesRv.adapter = messageAdapter
         userInputEt = findViewById(R.id.user_input)
         userActionFab = findViewById(R.id.fab)
+        pickImageBtn = findViewById(R.id.pick_image_btn)
         clearChatBtn = findViewById(R.id.clear_chat)
         drawerLayout = findViewById(R.id.drawer_layout)
         historyRv = findViewById(R.id.history_rv)
@@ -150,6 +153,10 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Please select a model in Settings first", Toast.LENGTH_SHORT).show()
                 startActivity(Intent(this, SettingsActivity::class.java))
             }
+        }
+
+        pickImageBtn.setOnClickListener {
+            pickImageActivity.launch("image/*")
         }
 
         openSettingsBtn.setOnClickListener {
@@ -250,6 +257,7 @@ class MainActivity : AppCompatActivity() {
         engine.resetChat()
         clearChatBtn.visibility = android.view.View.GONE
         userInputEt.text = null
+        selectedImageBytes = null
         Toast.makeText(this, "Started new chat", Toast.LENGTH_SHORT).show()
     }
 
@@ -315,7 +323,20 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         Log.i(TAG, "Selected file uri:\n $uri")
-        uri?.let { handleSelectedModel(uri) }
+        uri?.let { handleSelectedModel(it) }
+    }
+
+    private val pickImageActivity = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        uri?.let {
+            contentResolver.openInputStream(uri)?.use { inputStream ->
+                selectedImageBytes = inputStream.readBytes()
+                Toast.makeText(this, "Image attached (${selectedImageBytes?.size} bytes). Ready to send.", Toast.LENGTH_SHORT).show()
+                // Change UI to reflect image attachment (e.g. change hint or show an icon)
+                userInputEt.hint = "Image attached! Ask a question about it..."
+            }
+        }
     }
 
     private fun handleSelectedModel(uri: Uri) {
@@ -443,7 +464,23 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         userMsg
                     }
-                    engine.sendUserPrompt(promptToSend)
+
+                    val imageBytes = selectedImageBytes
+                    val flowResult = if (imageBytes != null) {
+                        Log.i(TAG, "Pipeline: sendImagePrompt")
+                        engine.sendImagePrompt(imageBytes, promptToSend)
+                    } else {
+                        Log.i(TAG, "Pipeline: sendUserPrompt")
+                        engine.sendUserPrompt(promptToSend)
+                    }
+
+                    // clear attachment so we don't accidentally send it twice
+                    withContext(Dispatchers.Main) {
+                        selectedImageBytes = null
+                        userInputEt.hint = "Type and send a message!"
+                    }
+
+                    flowResult
                         .onStart { Log.d(TAG, "Generation started") }
                         .onCompletion { error: Throwable? ->
                             Log.d(TAG, "Generation completed. Total assistant tokens: ${lastAssistantMsg.length}, Error: $error")

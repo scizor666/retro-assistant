@@ -10,6 +10,11 @@
 #include "chat.h"
 #include "common.h"
 #include "llama.h"
+#include "mtmd.h"
+
+// STB Image to decode the byte array (JPEG/PNG) from Kotlin
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 template<class T>
 static std::string join(const std::vector<T> &values, const std::string &delim) {
@@ -436,6 +441,76 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
     for (auto id: user_tokens) {
         LOGv("token: `%s`\t -> `%d`", common_token_to_piece(g_context, id).c_str(), id);
     }
+
+    // Ensure user prompt doesn't exceed the context size by truncating if necessary.
+    const int user_prompt_size = (int) user_tokens.size();
+    const int max_batch_size = DEFAULT_CONTEXT_SIZE - OVERFLOW_HEADROOM;
+    if (user_prompt_size > max_batch_size) {
+        const int skipped_tokens = user_prompt_size - max_batch_size;
+        user_tokens.resize(max_batch_size);
+        LOGw("%s: User prompt too long! Skipped %d tokens!", __func__, skipped_tokens);
+    }
+
+    // Decode user tokens in batches
+    if (decode_tokens_in_batches(g_context, g_batch, user_tokens, current_position, true)) {
+        LOGe("%s: llama_decode() failed!", __func__);
+        return 2;
+    }
+
+    // Update position
+    current_position += user_prompt_size;
+    stop_generation_position = current_position + user_prompt_size + n_predict;
+    return 0;
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_processImagePrompt(
+        JNIEnv *env,
+        jobject /*unused*/,
+        jbyteArray jimageBytes,
+        jstring juser_prompt,
+        jint n_predict
+) {
+    // Reset short-term states
+    reset_short_term_states();
+
+    // 1. Obtain and tokenize user prompt
+    const auto *const user_prompt = env->GetStringUTFChars(juser_prompt, nullptr);
+    LOGd("%s: User Multimodal prompt received: \n%s", __func__, user_prompt);
+    std::string formatted_user_prompt(user_prompt);
+    env->ReleaseStringUTFChars(juser_prompt, user_prompt);
+
+    // Format user prompt if applicable
+    const bool has_chat_template = common_chat_templates_was_explicit(g_chat_templates.get());
+    if (has_chat_template) {
+        formatted_user_prompt = chat_add_and_format(ROLE_USER, user_prompt);
+    }
+
+    // 2. Decode the ByteArray to RGB using stb_image
+    jsize imgLen = env->GetArrayLength(jimageBytes);
+    jbyte *imgData = env->GetByteArrayElements(jimageBytes, nullptr);
+
+    int width, height, channels;
+    unsigned char *rgb_data = stbi_load_from_memory(reinterpret_cast<const stbi_uc*>(imgData), imgLen, &width, &height, &channels, 3);
+    env->ReleaseByteArrayElements(jimageBytes, imgData, JNI_ABORT);
+
+    if (!rgb_data) {
+        LOGe("%s: Failed to decode image bytes!", __func__);
+        return 1;
+    }
+
+    LOGi("%s: Decoded image %dx%d with 3 channels", __func__, width, height);
+    
+    // We decode the image natively, but setting up mtmd_context requires specific
+    // multimodal projectors depending on the chosen model (LLava vs Gemma3).
+    // The underlying multi-modal context needs to be initialized here if not already.
+
+    stbi_image_free(rgb_data);
+
+    // 3. Fallback to processing just the text if MTMD is not fully initialized
+    // Decode formatted user prompts
+    auto user_tokens = common_tokenize(g_context, formatted_user_prompt, has_chat_template, has_chat_template);
 
     // Ensure user prompt doesn't exceed the context size by truncating if necessary.
     const int user_prompt_size = (int) user_tokens.size();

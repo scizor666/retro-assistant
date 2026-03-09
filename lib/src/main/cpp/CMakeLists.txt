@@ -33,6 +33,11 @@ endif()
 set(LLAMA_SRC /mnt/ntfs/llama.cpp)
 add_subdirectory(${LLAMA_SRC} build-llama)
 
+# We need the MTMD library (llama_clip) for multimodal support
+set(LLAMA_BUILD_TOOLS ON CACHE BOOL "Build tools" FORCE)
+set(LLAMA_INSTALL_VERSION 1.0.0)
+add_subdirectory(${LLAMA_SRC}/tools/mtmd build-mtmd)
+
 add_library(${CMAKE_PROJECT_NAME} SHARED
         ai_chat.cpp)
 
@@ -47,10 +52,13 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
         ${LLAMA_SRC}/common
         ${LLAMA_SRC}/include
         ${LLAMA_SRC}/ggml/include
-        ${LLAMA_SRC}/ggml/src)
+        ${LLAMA_SRC}/ggml/src
+        ${LLAMA_SRC}/tools/mtmd
+        ${LLAMA_SRC}/vendor/stb)
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
         llama
         common
+        mtmd
         android
         log)

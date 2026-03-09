@@ -31,6 +31,11 @@ interface InferenceEngine {
     fun sendUserPrompt(message: String, predictLength: Int = DEFAULT_PREDICT_LENGTH): Flow<String>
 
     /**
+     * Sends a user prompt and an image (byte array) to the loaded model.
+     */
+    fun sendImagePrompt(imageBytes: ByteArray, message: String, predictLength: Int = DEFAULT_PREDICT_LENGTH): Flow<String>
+
+    /**
      * Runs a benchmark with the specified parameters.
      */
     suspend fun bench(pp: Int, tg: Int, pl: Int, nr: Int = 1): String
