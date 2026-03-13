@@ -293,15 +293,40 @@ static void shift_context() {
     LOGi("%s: Context shifting done! Current position: %d", __func__, current_position);
 }
 
-static std::string chat_add_and_format(const std::string &role, const std::string &content) {
-    common_chat_msg new_msg;
-    new_msg.role = role;
-    new_msg.content = content;
-    auto formatted = common_chat_format_single(
-            g_chat_templates.get(), chat_msgs, new_msg, role == ROLE_USER, /* use_jinja */ false);
-    chat_msgs.push_back(new_msg);
-    LOGi("%s: Formatted and added %s message: \n%s\n", __func__, role.c_str(), formatted.c_str());
-    return formatted;
+static std::string chat_add_and_format(const std::string &role, const std::string &history_content, const std::string &prompt_content = "") {
+    common_chat_msg history_msg;
+    history_msg.role = role;
+    history_msg.content = history_content;
+
+    if (role == ROLE_SYSTEM) {
+        chat_msgs.push_back(history_msg);
+        return history_content;
+    }
+
+    common_chat_msg prompt_msg;
+    prompt_msg.role = role;
+    prompt_msg.content = prompt_content.empty() ? history_content : prompt_content;
+
+    common_chat_templates_inputs inputs;
+    inputs.messages = chat_msgs;
+    inputs.messages.push_back(prompt_msg);
+    inputs.add_generation_prompt = (role != ROLE_ASSISTANT);
+    inputs.use_jinja = true;
+    inputs.add_bos = true; 
+
+    LOGi("%s: Applying template to %zu messages. add_gen=%d", __func__, inputs.messages.size(), inputs.add_generation_prompt);
+    
+    auto chat_params = common_chat_templates_apply(g_chat_templates.get(), inputs);
+    std::string result = chat_params.prompt;
+
+    // Ensure model turn header has a newline if it's a generation prompt
+    if (inputs.add_generation_prompt && !result.empty() && result.back() != '\n') {
+        result += "\n";
+    }
+    
+    chat_msgs.push_back(history_msg);
+    LOGi("%s: Added clean %s message to history. Full prompt length: %zu", __func__, role.c_str(), result.size());
+    return result;
 }
 
 /**
@@ -377,39 +402,16 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processSystemPrompt(
 
     // Obtain system prompt from JEnv
     const auto *system_prompt = env->GetStringUTFChars(jsystem_prompt, nullptr);
-    LOGd("%s: System prompt received: \n%s", __func__, system_prompt);
+    LOGi("%s: System prompt received: \n%s", __func__, system_prompt);
     std::string formatted_system_prompt(system_prompt);
     env->ReleaseStringUTFChars(jsystem_prompt, system_prompt);
 
-    // Format system prompt if applicable
-    const bool has_chat_template = common_chat_templates_was_explicit(g_chat_templates.get());
-    if (has_chat_template) {
-        formatted_system_prompt = chat_add_and_format(ROLE_SYSTEM, system_prompt);
-    }
-
-    // Tokenize system prompt
-    const auto system_tokens = common_tokenize(g_context, formatted_system_prompt,
-                                               has_chat_template, has_chat_template);
-    for (auto id: system_tokens) {
-        LOGv("token: `%s`\t -> `%d`", common_token_to_piece(g_context, id).c_str(), id);
-    }
-
-    // Handle context overflow
-    const int max_batch_size = DEFAULT_CONTEXT_SIZE - OVERFLOW_HEADROOM;
-    if ((int) system_tokens.size() > max_batch_size) {
-        LOGe("%s: System prompt too long for context! %d tokens, max: %d",
-             __func__, (int) system_tokens.size(), max_batch_size);
-        return 1;
-    }
-
-    // Decode system tokens in batches
-    if (decode_tokens_in_batches(g_context, g_batch, system_tokens, current_position)) {
-        LOGe("%s: llama_decode() failed!", __func__);
-        return 2;
-    }
-
-    // Update position
-    system_prompt_position = current_position = (int) system_tokens.size();
+    // Add to history tracking
+    chat_add_and_format(ROLE_SYSTEM, formatted_system_prompt);
+    
+    // Return token count as info (for native logs) but return 0 to Java for success
+    const auto system_tokens = common_tokenize(g_context, formatted_system_prompt, false, false);
+    LOGi("%s: System prompt processed with %zu tokens", __func__, system_tokens.size());
     return 0;
 }
 
@@ -419,28 +421,42 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
         JNIEnv *env,
         jobject /*unused*/,
         jstring juser_prompt,
-        jint n_predict
+        jint n_predict,
+        jstring jhistory_prompt
 ) {
     // Reset short-term states
     reset_short_term_states();
 
     // Obtain and tokenize user prompt
     const auto *const user_prompt = env->GetStringUTFChars(juser_prompt, nullptr);
-    LOGd("%s: User prompt received: \n%s", __func__, user_prompt);
+    const auto *const history_prompt = jhistory_prompt ? env->GetStringUTFChars(jhistory_prompt, nullptr) : user_prompt;
+    
+    LOGd("%s: User prompt (augmented) received: \n%s", __func__, user_prompt);
+    LOGd("%s: History prompt (clean) received: \n%s", __func__, history_prompt);
+    
     std::string formatted_user_prompt(user_prompt);
-    env->ReleaseStringUTFChars(juser_prompt, user_prompt);
 
     // Format user prompt if applicable
     const bool has_chat_template = common_chat_templates_was_explicit(g_chat_templates.get());
     if (has_chat_template) {
-        formatted_user_prompt = chat_add_and_format(ROLE_USER, user_prompt);
+        // Reset KV cache and position tracking before processing each NEW turn. 
+        // We will re-encode the ENTIRE sequence starting with BOS since the Jinja template handles the history.
+        llama_memory_clear(llama_get_memory(g_context), false);
+        current_position = 0;
+
+        // chat_add_and_format returns the FULL formatted conversation
+        formatted_user_prompt = chat_add_and_format(ROLE_USER, history_prompt, user_prompt);
+        LOGi("%s: Full formatted history sent to model:\n--------------------\n%s\n--------------------", __func__, formatted_user_prompt.c_str());
     }
 
+    env->ReleaseStringUTFChars(juser_prompt, user_prompt);
+    if (jhistory_prompt) env->ReleaseStringUTFChars(jhistory_prompt, history_prompt);
+
     // Decode formatted user prompts
-    auto user_tokens = common_tokenize(g_context, formatted_user_prompt, has_chat_template, has_chat_template);
-    for (auto id: user_tokens) {
-        LOGv("token: `%s`\t -> `%d`", common_token_to_piece(g_context, id).c_str(), id);
-    }
+    // Use add_special = false to avoid injecting BOS tokens in the middle of the context
+    // Tokenize the full formatted prompt. We use add_special=true to ensure BOS is added (especially important for rebuild-mode at turn 0).
+    auto user_tokens = common_tokenize(g_context, formatted_user_prompt, true, has_chat_template);
+    LOGd("%s: User turn token count: %zu", __func__, user_tokens.size());
 
     // Ensure user prompt doesn't exceed the context size by truncating if necessary.
     const int user_prompt_size = (int) user_tokens.size();
@@ -459,7 +475,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
 
     // Update position
     current_position += user_prompt_size;
-    stop_generation_position = current_position + user_prompt_size + n_predict;
+    stop_generation_position = current_position + n_predict;
     return 0;
 }
 
@@ -529,7 +545,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processImagePrompt(
 
     // Update position
     current_position += user_prompt_size;
-    stop_generation_position = current_position + user_prompt_size + n_predict;
+    stop_generation_position = current_position + n_predict;
     return 0;
 }
 
@@ -581,12 +597,13 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
 
     // Stop if reaching the marked position
     if (current_position >= stop_generation_position) {
-        LOGw("%s: STOP: hitting stop position: %d", __func__, stop_generation_position);
+        LOGw("%s: STOP: hitting stop position: %d (current: %d)", __func__, stop_generation_position, current_position);
         return nullptr;
     }
 
     // Sample next token
     const auto new_token_id = common_sampler_sample(g_sampler, g_context, -1);
+    LOGv("%s: Sampled token id: %d, text: '%s'", __func__, new_token_id, common_token_to_piece(g_context, new_token_id).c_str());
     common_sampler_accept(g_sampler, new_token_id, true);
 
     // Populate the batch with new token, then decode
@@ -602,7 +619,8 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
 
     // Stop if next token is EOG
     if (llama_vocab_is_eog(llama_model_get_vocab(g_model), new_token_id)) {
-        LOGd("id: %d,\tIS EOG!\nSTOP.", new_token_id);
+        LOGi("%s: STOP: EOG token detected (id: %d, text: '%s')", __func__, new_token_id, common_token_to_piece(g_context, new_token_id).c_str());
+        // Add assistant message to history.
         chat_add_and_format(ROLE_ASSISTANT, assistant_ss.str());
         return nullptr;
     }
@@ -615,11 +633,10 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
     jstring result = nullptr;
     if (is_valid_utf8(cached_token_chars.c_str())) {
         result = env->NewStringUTF(cached_token_chars.c_str());
-        LOGv("id: %d,\tcached: `%s`,\tnew: `%s`", new_token_id, cached_token_chars.c_str(), new_token_chars.c_str());
-
         assistant_ss << cached_token_chars;
         cached_token_chars.clear();
-    } else {
+    }
+ else {
         LOGv("id: %d,\tappend to cache", new_token_id);
         result = env->NewStringUTF("");
     }
@@ -634,12 +651,26 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_unload(JNIEnv * /*unused*/, job
     reset_long_term_states();
     reset_short_term_states();
 
-    // Free up resources
-    common_sampler_free(g_sampler);
-    g_chat_templates.reset();
-    llama_batch_free(g_batch);
-    llama_free(g_context);
-    llama_model_free(g_model);
+    // Free up resources only if they were initialized
+    if (g_sampler) {
+        common_sampler_free(g_sampler);
+        g_sampler = nullptr;
+    }
+    if (g_chat_templates) {
+        g_chat_templates.reset();
+    }
+    if (g_batch.n_tokens > 0) {
+        llama_batch_free(g_batch);
+        g_batch = {};
+    }
+    if (g_context) {
+        llama_free(g_context);
+        g_context = nullptr;
+    }
+    if (g_model) {
+        llama_model_free(g_model);
+        g_model = nullptr;
+    }
 }
 
 extern "C"

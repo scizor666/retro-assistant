@@ -25,6 +25,9 @@ This model was trained and exported using the tools and scripts available in our
 
 ## Features
 
+- **Gemma 3 Optimized**: Robust support for Gemma 3 models with fixed BOS token generation and system prompt handling.
+- **On-device RAG**: Context-aware responses using an integrated Retrieval-Augmented Generation (RAG) system.
+- **Text Selection**: Long-press any message to select and copy text.
 - **1000 Conversation History**: Persistent storage for up to 1000 chat sessions.
 - **Deep Model Integration**: Direct interaction with on-device GGUF models.
 - **Data Management**: Easily clear history or reset all app data from Settings.
