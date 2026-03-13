@@ -2,191 +2,183 @@ package com.example.llama.rag
 
 import android.content.Context
 import android.util.Log
-import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.text.textembedder.TextEmbedder
+import com.google.mediapipe.tasks.text.textembedder.TextEmbedder.TextEmbedderOptions
+import com.google.mediapipe.tasks.core.BaseOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import java.io.FileInputStream
+import java.io.File
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 import kotlin.math.sqrt
 
-/**
- * Provides retrieval-augmented context for user queries using the same pipeline
- * as the Ubuntu evaluate.py:
- *
- *  1. Embed query with MediaPipe TextEmbedder (text_embedder.tflite asset)
- *  2. L2-normalise the query vector
- *  3. Dot-product against pre-normalised corpus vectors (rag_index.bin asset)
- *  4. Return top-k chunks where cosine similarity > 0.65, joined by "\n---\n"
- *     or null when nothing passes the threshold
- *
- * Parameters are identical to evaluate.py:
- *   top_k = 2, threshold = 0.65
- */
 class RagManager(private val context: Context) {
 
     companion object {
         private const val TAG = "RagManager"
-
-        private const val ASSET_EMBEDDER = "text_embedder.tflite"
-        private const val ASSET_BIN      = "rag_index.bin"
-        private const val ASSET_JSON     = "rag_texts.json"
-
-        // Must match evaluate.py constants exactly
-        private const val TOP_K = 2
-        private const val THRESHOLD = 0.4f
-        private const val CONTEXT_SEPARATOR = "\n---\n"
     }
 
-    // -----------------------------------------------------------------------
-    // Lazy-loaded singletons — initialised once on first use (IO thread)
-    // -----------------------------------------------------------------------
+    private var embedder: TextEmbedder? = null
+    private var vectorArray: FloatArray? = null
+    private var numRows: Int = 0
+    private var numCols: Int = 0
 
-    /** MediaPipe TextEmbedder backed by the bundled TFLite model */
-    private val embedder: TextEmbedder by lazy {
-        Log.i(TAG, "Initialising MediaPipe TextEmbedder from $ASSET_EMBEDDER …")
-        val baseOptions = BaseOptions.builder()
-            .setModelAssetPath(ASSET_EMBEDDER)
-            .build()
-        val options = TextEmbedder.TextEmbedderOptions.builder()
-            .setBaseOptions(baseOptions)
-            .build()
-        TextEmbedder.createFromOptions(context, options).also {
-            Log.i(TAG, "TextEmbedder ready")
+    // Memory-mapped metadata
+    private var metaIndexBuffer: ByteBuffer? = null 
+    private var metaDataBuffer: ByteBuffer? = null
+    private var metaTotalRows: Int = 0
+
+    private var isInitialized = false
+
+    private suspend fun initialize() = withContext(Dispatchers.IO) {
+        if (isInitialized) return@withContext
+
+        try {
+            val startTime = System.currentTimeMillis()
+            // 1. Load Text Embedder
+            val baseOptions = BaseOptions.builder()
+                .setModelAssetPath("text_embedder.tflite")
+                .build()
+            val options = TextEmbedderOptions.builder()
+                .setBaseOptions(baseOptions)
+                .build()
+            embedder = TextEmbedder.createFromOptions(context, options)
+
+            // 2. Load Vector Index into Heap (requires largeHeap="true")
+            val vecFile = copyAssetToFile("rag_index.bin")
+            RandomAccessFile(vecFile, "r").use { raf ->
+                val channel = raf.channel
+                val size = channel.size()
+                val buffer = channel.map(FileChannel.MapMode.READ_ONLY, 0, size).order(ByteOrder.LITTLE_ENDIAN)
+                
+                numRows = buffer.int
+                numCols = buffer.int
+                
+                Log.i(TAG, "Allocating ${numRows * numCols * 4} bytes for vectors in heap...")
+                val floatArray = FloatArray(numRows * numCols)
+                buffer.position(8)
+                buffer.asFloatBuffer().get(floatArray)
+                
+                Log.i(TAG, "Pre-normalizing vectors...")
+                for (r in 0 until numRows) {
+                    var sumSq = 0f
+                    val offset = r * numCols
+                    for (c in 0 until numCols) {
+                        val v = floatArray[offset + c]
+                        sumSq += v * v
+                    }
+                    val norm = sqrt(sumSq)
+                    if (norm > 0) {
+                        for (c in 0 until numCols) {
+                            floatArray[offset + c] /= norm
+                        }
+                    }
+                }
+                vectorArray = floatArray
+                Log.i(TAG, "Vectors loaded and normalized in ${System.currentTimeMillis() - startTime}ms")
+            }
+
+            // 3. Memory-map Metadata (.bin)
+            val metaFile = copyAssetToFile("rag_metadata.bin")
+            val rafMeta = RandomAccessFile(metaFile, "r")
+            val channelMeta = rafMeta.channel
+            val sizeMeta = channelMeta.size()
+            val metaFullBuffer = channelMeta.map(FileChannel.MapMode.READ_ONLY, 0, sizeMeta).order(ByteOrder.LITTLE_ENDIAN)
+            
+            metaTotalRows = metaFullBuffer.int
+            val indexTableSize = metaTotalRows * 8 
+            
+            metaFullBuffer.position(4)
+            metaIndexBuffer = (metaFullBuffer.slice().limit(indexTableSize) as ByteBuffer).order(ByteOrder.LITTLE_ENDIAN)
+            
+            metaFullBuffer.position(4 + indexTableSize)
+            metaDataBuffer = (metaFullBuffer.slice() as ByteBuffer).order(ByteOrder.LITTLE_ENDIAN)
+            
+            Log.i(TAG, "Mapped metadata: $metaTotalRows rows. Total init: ${System.currentTimeMillis() - startTime}ms")
+            isInitialized = true
+        } catch (e: Exception) {
+            Log.e(TAG, "Initialization failed", e)
         }
     }
 
-    /** Holds the vector data and its dimensions together to ensure atomicity */
-    private data class CorpusData(
-        val vectors: FloatArray,
-        val numRows: Int,
-        val numCols: Int
-    )
-
-    private val corpus: CorpusData by lazy { loadBinaryVectors() }
-
-    /** Parallel text chunks from rag_texts.json, same ordering as vectors. */
-    private val corpusTexts: List<String> by lazy { loadTextsJson() }
-
-    // -----------------------------------------------------------------------
-    // Public API
-    // -----------------------------------------------------------------------
-
-    suspend fun getContext(query: String): String? = withContext(Dispatchers.IO) {
-        try {
-            // Ensure assets are loaded
-            val (vectors, rows, cols) = corpus
-            
-            // 1. Embed query
-            val result = embedder.embed(query)
-            val embedding = result.embeddingResult().embeddings()[0]
-            val rawVec: FloatArray = embedding.floatEmbedding()
-                ?: run {
-                    Log.w(TAG, "Embedder returned null floatEmbedding, skipping RAG")
-                    return@withContext null
+    private fun copyAssetToFile(assetName: String): File {
+        val file = File(context.filesDir, assetName)
+        if (!file.exists()) {
+            Log.i(TAG, "Copying $assetName to internal storage...")
+            context.assets.open(assetName).use { input ->
+                file.outputStream().use { output ->
+                    input.copyTo(output)
                 }
+            }
+        }
+        return file
+    }
 
-            // 2. L2-normalise query vector
-            val qNorm = l2Norm(rawVec)
-            val qVec = if (qNorm > 0f) FloatArray(rawVec.size) { rawVec[it] / qNorm }
-                       else rawVec
+    suspend fun getContext(query: String, topK: Int = 2, threshold: Float = 0.78f): String? = withContext(Dispatchers.IO) {
+        if (!isInitialized) initialize()
 
-            // 3. Cosine similarities via dot-product
-            val scores = FloatArray(rows) { row ->
-                dotProduct(vectors, row * cols, qVec)
+        val currentEmbedder = embedder ?: return@withContext null
+        val vArr = vectorArray ?: return@withContext null
+        val mIdxBuf = metaIndexBuffer ?: return@withContext null
+        val mDataBuf = metaDataBuffer ?: return@withContext null
+
+        try {
+            val startTime = System.currentTimeMillis()
+            // Embed query
+            val result = currentEmbedder.embed(query)
+            val queryVector = result.embeddingResult().embeddings()[0].floatEmbedding()
+            
+            // L2 Normalize query vector
+            var qNorm = 0f
+            for (v in queryVector) qNorm += v * v
+            qNorm = sqrt(qNorm)
+            if (qNorm > 0) {
+                for (i in queryVector.indices) queryVector[i] /= qNorm
             }
 
-            // 4. Argsort descending, take top-k
+            // Compute cosine similarities using Heap-resident vectors (Fastest)
+            val scores = FloatArray(numRows)
+            for (r in 0 until numRows) {
+                var dot = 0f
+                val rowOffset = r * numCols
+                for (c in 0 until numCols) {
+                    dot += queryVector[c] * vArr[rowOffset + c]
+                }
+                scores[r] = dot
+            }
+
+            // Get top K indices above threshold and with sufficient content length
             val topIndices = scores.indices
+                .filter { scores[it] > threshold }
+                .filter { idx ->
+                    val length = mIdxBuf.getInt(idx * 8 + 4)
+                    length > 100 
+                }
                 .sortedByDescending { scores[it] }
-                .take(TOP_K)
+                .take(topK)
 
-            val topScore = topIndices.firstOrNull()?.let { scores[it] } ?: 0f
-            Log.i(TAG, "Top context score for '$query': ${"%.4f".format(topScore)}")
+            Log.d(TAG, "Search completed in ${System.currentTimeMillis() - startTime}ms. Found ${topIndices.size} matches.")
 
-            // 5. Filter by threshold
-            val chunks = topIndices
-                .filter { scores[it] > THRESHOLD }
-                .mapNotNull { corpusTexts.getOrNull(it) }
-
-            if (chunks.isEmpty()) {
-                Log.i(TAG, "No context above threshold $THRESHOLD (best: ${"%.4f".format(topScore)})")
+            if (topIndices.isEmpty()) {
                 return@withContext null
             }
 
-            Log.i(TAG, "Injecting context (${chunks.size} chunks, ${chunks.sumOf { it.length }} chars)")
-            chunks.joinToString(CONTEXT_SEPARATOR)
-
-        } catch (e: Exception) {
-            Log.e(TAG, "RAG lookup failed: ${e.message}", e)
-            null
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Internal helpers
-    // -----------------------------------------------------------------------
-
-    private fun loadBinaryVectors(): CorpusData {
-        Log.i(TAG, "Loading $ASSET_BIN …")
-        context.assets.open(ASSET_BIN).use { input ->
-            val headerBytes = ByteArray(8)
-            input.read(headerBytes)
-            
-            val headerBuf = ByteBuffer.wrap(headerBytes).order(ByteOrder.LITTLE_ENDIAN)
-            val rows = headerBuf.int
-            val cols = headerBuf.int
-
-            Log.i(TAG, "Header: $rows vectors of dim $cols")
-
-            val totalElements = rows * cols
-            val dataBytes = ByteArray(totalElements * 4)
-            
-            // Read in chunks as .read(byteArray) isn't guaranteed to fill the whole buffer in one call for large streams
-            var bytesRead = 0
-            while (bytesRead < dataBytes.size) {
-                val n = input.read(dataBytes, bytesRead, dataBytes.size - bytesRead)
-                if (n == -1) break
-                bytesRead += n
+            // Fetch strings
+            return@withContext topIndices.joinToString("\n---\n") { idx ->
+                val offset = mIdxBuf.getInt(idx * 8)
+                val length = mIdxBuf.getInt(idx * 8 + 4)
+                val bytes = ByteArray(length)
+                val slice = mDataBuf.duplicate()
+                slice.position(offset)
+                slice.get(bytes)
+                String(bytes, Charsets.UTF_8)
             }
 
-            val floatArr = FloatArray(totalElements)
-            ByteBuffer.wrap(dataBytes).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(floatArr)
-            
-            Log.i(TAG, "Binary vectors loaded successfully")
-            return CorpusData(floatArr, rows, cols)
+        } catch (e: Exception) {
+            Log.e(TAG, "getContext failed", e)
+            return@withContext null
         }
-    }
-
-    private fun loadTextsJson(): List<String> {
-        Log.i(TAG, "Loading $ASSET_JSON …")
-        val raw = context.assets.open(ASSET_JSON).bufferedReader().readText()
-        val arr = JSONArray(raw)
-        val texts = ArrayList<String>(arr.length())
-        for (i in 0 until arr.length()) {
-            texts.add(arr.getJSONObject(i).optString("content", ""))
-        }
-        Log.i(TAG, "Loaded ${texts.size} text chunks")
-        return texts
-    }
-
-    /** L2 (Euclidean) norm of a FloatArray */
-    private fun l2Norm(vec: FloatArray): Float {
-        var sum = 0f
-        for (v in vec) sum += v * v
-        return sqrt(sum)
-    }
-
-    /**
-     * Dot-product of [query] against a single row in [matrix].
-     * [rowStart] is the flat index of the first element of that row.
-     */
-    private fun dotProduct(matrix: FloatArray, rowStart: Int, query: FloatArray): Float {
-        var sum = 0f
-        for (i in query.indices) sum += matrix[rowStart + i] * query[i]
-        return sum
     }
 }

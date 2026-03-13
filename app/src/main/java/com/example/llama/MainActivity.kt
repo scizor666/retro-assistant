@@ -83,6 +83,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var historySearchEt: EditText
     private lateinit var openHistoryBtn: ImageButton
     private var messageCollectionJob: Job? = null
+    private var typingJob: Job? = null
     private var isRefreshingModel = false
     private val searchQuery = MutableStateFlow("")
 
@@ -371,6 +372,16 @@ class MainActivity : AppCompatActivity() {
         if (messages.isNotEmpty()) {
             clearChatBtn.visibility = android.view.View.VISIBLE
         }
+
+        // Set the stable persona once the model is ready.
+        lifecycleScope.launch(Dispatchers.Default) {
+             try {
+                 engine.setSystemPrompt("You are a friendly, expert Retro Gaming Assistant. Use your knowledge to help users with classic consoles, retro games, and emulation. Answer naturally and directly like a human expert. If the user asks a question completely unrelated to retro gaming, politely decline.")
+                 Log.i(TAG, "System prompt set successfully.")
+             } catch (e: Exception) {
+                 Log.e(TAG, "Failed to set system prompt", e)
+             }
+        }
     }
 
     private fun isUninterruptible(): Boolean {
@@ -427,10 +438,30 @@ class MainActivity : AppCompatActivity() {
                 val insertPos = messages.size
                 messages.add(Message(UUID.randomUUID().toString(), userMsg, true))
                 lastAssistantMsg.clear()
-                messages.add(Message(UUID.randomUUID().toString(), lastAssistantMsg.toString(), false))
+                messages.add(Message(UUID.randomUUID().toString(), "Thinking", false, isThinking = true))
                 
                 messageAdapter.notifyItemRangeInserted(insertPos, 2)
                 messagesRv.scrollToPosition(messages.size - 1)
+
+                // Start thinking animation
+                typingJob?.cancel()
+                typingJob = lifecycleScope.launch {
+                    var dotCount = 0
+                    while (true) {
+                        kotlinx.coroutines.delay(500)
+                        val dots = ".".repeat((dotCount % 3) + 1)
+                        withContext(Dispatchers.Main) {
+                            if (messages.isNotEmpty() && !messages.last().isUser) {
+                                val lastMsg = messages.last()
+                                if (lastMsg.isThinking) {
+                                    messages[messages.size - 1] = lastMsg.copy(content = "Thinking$dots")
+                                    messageAdapter.notifyItemChanged(messages.size - 1)
+                                }
+                            }
+                        }
+                        dotCount++
+                    }
+                }
 
                 // Show clear button when first message is added
                 clearChatBtn.visibility = android.view.View.VISIBLE
@@ -450,28 +481,37 @@ class MainActivity : AppCompatActivity() {
 
                 Log.i(TAG, "Launching generation job for prompt: '${userMsg.take(50)}...'")
                 generationJob = lifecycleScope.launch(Dispatchers.Default) {
+                    val prefs = getSharedPreferences(SettingsActivity.PREFS_NAME, Context.MODE_PRIVATE)
                     // RAG: retrieve context on IO, prepend to prompt if found.
                     // UI always shows userMsg; only the engine receives the augmented prompt.
-                    Log.i(TAG, "RAG: Requesting context for user input...")
-                    val ragContext = ragManager.getContext(userMsg)
+                    val isRagEnabled = prefs.getBoolean(PREF_RAG_ENABLED, true)
+                    val ragContext = if (isRagEnabled) {
+                        Log.i(TAG, "RAG: Requesting context for user input...")
+                        ragManager.getContext(userMsg)
+                    } else {
+                        Log.i(TAG, "RAG: DISABLED via settings.")
+                        null
+                    }
+                    
                     if (ragContext != null) {
                         Log.i(TAG, "RAG: SUCCESS. Injected context of length ${ragContext.length}")
-                    } else {
+                    } else if (isRagEnabled) {
                         Log.i(TAG, "RAG: SKIPPED. No relevant context found.")
                     }
-                    val promptToSend = if (ragContext != null) {
-                        "Context:\n$ragContext\n\nQuestion:\n$userMsg"
+                    val augmentedPrompt = if (ragContext != null) {
+                        "--- INTERNAL KNOWLEDGE START ---\n$ragContext\n--- INTERNAL KNOWLEDGE END ---\n\nBased on your expertise and the snippets above, please answer: $userMsg"
                     } else {
-                        userMsg
+                        null
                     }
 
                     val imageBytes = selectedImageBytes
                     val flowResult = if (imageBytes != null) {
                         Log.i(TAG, "Pipeline: sendImagePrompt")
-                        engine.sendImagePrompt(imageBytes, promptToSend)
+                        engine.sendImagePrompt(imageBytes, augmentedPrompt ?: userMsg)
                     } else {
-                        Log.i(TAG, "Pipeline: sendUserPrompt")
-                        engine.sendUserPrompt(promptToSend)
+                        Log.i(TAG, "Pipeline: sendUserPrompt with isolation")
+                        // message = userMsg (saved to history), augmentedMessage = augmentedPrompt (used for current turn)
+                        engine.sendUserPrompt(userMsg, augmentedMessage = augmentedPrompt)
                     }
 
                     // clear attachment so we don't accidentally send it twice
@@ -481,8 +521,8 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     flowResult
-                        .onStart { Log.d(TAG, "Generation started") }
                         .onCompletion { error: Throwable? ->
+                            typingJob?.cancel()
                             Log.d(TAG, "Generation completed. Total assistant tokens: ${lastAssistantMsg.length}, Error: $error")
                             withContext(Dispatchers.Main) {
                                 if (lastAssistantMsg.isEmpty()) {
@@ -500,22 +540,29 @@ class MainActivity : AppCompatActivity() {
                                 // Persist assistant message once finished
                                 currentConversationId?.let { id ->
                                     val finalMsg = if (lastAssistantMsg.isEmpty()) "(No response from model)" else lastAssistantMsg.toString()
-                                    // Use a separate coroutine or scope if needed, but we are inside launch(Dispatchers.Default) usually, 
-                                    // however we are inside withContext(Dispatchers.Main) here.
                                     lifecycleScope.launch {
                                         repository.addMessage(id, finalMsg, false)
                                     }
                                 }
                             }
                         }.collect { token: String ->
-                            Log.i(TAG, "Token received: '$token'")
+                            Log.i(TAG, "Token received: '$token', total length: ${lastAssistantMsg.length}")
+                            typingJob?.cancel() // Stop thinking indicator on first token
                             withContext(Dispatchers.Main) {
                                 val messageCount = messages.size
                                 if (messageCount > 0 && !messages[messageCount - 1].isUser) {
-                                    messages.removeAt(messageCount - 1).copy(
-                                        content = lastAssistantMsg.append(token).toString()
-                                    ).let { messages.add(it) }
+                                    val lastMsg = messages[messageCount - 1]
+                                    if (lastMsg.isThinking) {
+                                        Log.i(TAG, "Cleaning 'Thinking' placeholder for first real token.")
+                                        lastAssistantMsg.clear() // Clear "Thinking..." placeholder
+                                    }
+                                    val updatedContent = lastAssistantMsg.append(token).toString()
+                                    messages[messageCount - 1] = lastMsg.copy(
+                                        content = updatedContent,
+                                        isThinking = false
+                                    )
 
+                                    Log.i(TAG, "Updating UI message ${messageCount - 1} with content length ${updatedContent.length}")
                                     messageAdapter.notifyItemChanged(messages.size - 1)
                                     messagesRv.scrollToPosition(messages.size - 1)
                                 }
@@ -561,6 +608,7 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         generationJob?.cancel()
         messageCollectionJob?.cancel()
+        typingJob?.cancel()
         super.onStop()
     }
 
@@ -582,6 +630,7 @@ class MainActivity : AppCompatActivity() {
 
         const val PREF_LAST_MODEL_PATH = "last_model_path"
         const val PREF_LAST_MODEL_METADATA = "last_model_metadata"
+        const val PREF_RAG_ENABLED = "rag_enabled"
         const val PREF_MODEL_CHANGED = "model_changed_flag"
     }
 }
